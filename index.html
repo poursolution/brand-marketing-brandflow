@@ -903,12 +903,12 @@ function normalizeData(d) {
   if (!Array.isArray(d.trash)) d.trash = [];                  // 휴지통 [{id, kind, label, ts, payload, ctx}]
   d.trash = d.trash.filter((t) => (Date.now() - (t && t.ts || 0)) < 30 * 24 * 60 * 60 * 1000);  // 30일 지난 항목 자동 삭제
   d.notices = d.notices.map((n) => (n.title === undefined && n.text !== undefined)
-    ? { id: n.id, title: n.text, body: '', date: n.date || '' }
-    : { id: n.id, title: n.title || '', body: n.body || '', date: n.date || '' });
+    ? { id: n.id, title: n.text, body: '', date: n.date || '', createdAt: n.createdAt }
+    : { id: n.id, title: n.title || '', body: n.body || '', date: n.date || '', createdAt: n.createdAt });
   d.meetings = d.meetings.map((n) => ({
     id: n.id, title: n.title || '', type: n.type || '일반 회의', date: n.date || '', time: n.time || '',
     attendees: Array.isArray(n.attendees) ? n.attendees : [], authorId: n.authorId || '', authorName: n.authorName || '',
-    agenda: n.agenda || '', body: n.body || '', projectId: n.projectId || '',
+    agenda: n.agenda || '', body: n.body || '', projectId: n.projectId || '', createdAt: n.createdAt,
   }));
   d.projects = d.projects.map((p) => ({
     id: p.id || uid('pj'), memberId: p.memberId || '', name: p.name || '', note: p.note || '',
@@ -1034,6 +1034,19 @@ function auditAdd(action, kind, label) {
 function auditSeenTs() { try { return parseInt(localStorage.getItem(LS_AUDIT_SEEN) || '0', 10) || 0; } catch (e) { return 0; } }
 function markAuditSeen() { try { localStorage.setItem(LS_AUDIT_SEEN, String(Date.now())); } catch (e) {} }
 function auditUnseen() { const s = auditSeenTs(); return (data.auditLog || []).filter((a) => (a.ts || 0) > s).length; }
+
+/* ---------- 공지·회의록 "안 읽음" 배지 (기기별, 카카오톡식) ---------- */
+function boardSeenKey(coll) { return 'brandflow_' + coll + '_seen'; }
+function boardSeenTs(coll) { try { return parseInt(localStorage.getItem(boardSeenKey(coll)) || '0', 10) || 0; } catch (e) { return 0; } }
+function markBoardSeen(coll) { try { localStorage.setItem(boardSeenKey(coll), String(Date.now())); } catch (e) {} }
+// 항목 추가시각(ms). createdAt 없으면 date(YYYY-MM-DD)를 그날 0시로 환산해 폴백
+function itemTs(it) {
+  if (it && typeof it.createdAt === 'number') return it.createdAt;
+  if (it && it.date) { const t = Date.parse(it.date + 'T00:00:00'); if (!isNaN(t)) return t; }
+  return 0;
+}
+function boardUnseen(coll) { const s = boardSeenTs(coll); return (data[coll] || []).filter((it) => itemTs(it) > s).length; }
+
 function openAudit() { if (!adminUnlocked) return; view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'audit'; logTrash = false; markAuditSeen(); render(); }
 function clearAudit() { if (!requireAdmin()) return; if (!confirm('활동 기록을 모두 비울까요? (되돌릴 수 없습니다)')) return; data.auditLog = []; scheduleSave(); renderAudit(); }
 function addBrand() {
@@ -1271,8 +1284,8 @@ function marketingNav() {
       </div>`).join('') +
     (adminUnlocked ? `<button class="add-sub-nav" onclick="addBrand()">+ 브랜드 추가하기</button>` : '') +
     `<div class="side-cap">운영</div>` +
-    navItem(boardView && boardView.coll === 'notices', 'navNotices()', '📢 공지사항') +
-    navItem(boardView && boardView.coll === 'meetings', 'navMeetings()', '📝 회의록') +
+    navItem(boardView && boardView.coll === 'notices', 'navNotices()', `📢 공지사항${boardUnseen('notices') ? ` <span class="ah-badge">${boardUnseen('notices') > 99 ? '99+' : boardUnseen('notices')}</span>` : ''}`) +
+    navItem(boardView && boardView.coll === 'meetings', 'navMeetings()', `📝 회의록${boardUnseen('meetings') ? ` <span class="ah-badge">${boardUnseen('meetings') > 99 ? '99+' : boardUnseen('meetings')}</span>` : ''}`) +
     navItem(opsPage === 'sites', 'openSites()', '🔗 사이트모음') +
     navItem(opsPage === 'ai', 'openAi()', '🤖 마케팅팀 AI 모음') +
     navItem(expPage, 'openExpenses()', '💳 고정지출관리') +
@@ -1298,8 +1311,8 @@ function goLogDash() { view = 'log'; curMember = null; curProject = null; pjOpen
 function selectMember(id) { view = 'log'; curMember = id; curProject = null; pjOpenMeeting = null; pjMeetingEdit = false; pjSearch = ''; pjTab = 'active'; logTrash = false; render(); }
 function openLogTrash() { view = 'log'; curMember = null; curProject = null; pjOpenMeeting = null; pjMeetingEdit = false; logTrash = true; render(); }
 function goDashboard() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = null; render(); }
-function navNotices() { view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'notices', mode: 'list' }; render(); }
-function navMeetings() { view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'meetings', mode: 'list' }; render(); }
+function navNotices() { markBoardSeen('notices'); view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'notices', mode: 'list' }; render(); }
+function navMeetings() { markBoardSeen('meetings'); view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'meetings', mode: 'list' }; render(); }
 function openSites() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'sites'; render(); }
 function openAi() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'ai'; render(); }
 function selectBrand(i) { view = 'brand'; curBrand = i; curQuarter = 0; curCat = 'growth'; boardView = null; expPage = false; opsPage = null; render(); }
@@ -2123,7 +2136,6 @@ function renderBoardList(coll) {
   const main = document.getElementById('main');
   main.innerHTML = `
     <div class="b-head">
-      <button class="back-btn" onclick="closeBoard()">← 대시보드</button>
       <h1 class="dash-title">${cfg.icon} ${cfg.label}</h1>
       <button class="export-btn" onclick="addBoard('${coll}')">+ 추가</button>
     </div>
@@ -2158,8 +2170,7 @@ function renderBoardDetail(coll, id) {
 }
 function openBoard(coll) { boardView = { coll, mode: 'list' }; renderDashboard(); }
 function openBoardItem(coll, id) { boardView = { coll, mode: id }; renderDashboard(); }
-function closeBoard() { goDashboard(); }
-function addBoard(coll) { const n = { id: uid('x'), title: '', body: '', date: todayStr() }; boardItems(coll).unshift(n); scheduleSave(); boardView = { coll, mode: n.id }; renderDashboard(); }
+function addBoard(coll) { const n = { id: uid('x'), title: '', body: '', date: todayStr(), createdAt: Date.now() }; boardItems(coll).unshift(n); scheduleSave(); boardView = { coll, mode: n.id }; renderDashboard(); }
 function delBoardItem(coll, id, back) { if (!confirm('삭제할까요? (휴지통에서 복원할 수 있습니다.)')) return; const removed = boardItems(coll).find((n) => n.id === id); data[coll] = boardItems(coll).filter((n) => n.id !== id); if (removed) trashAdd(coll, removed.title, removed); scheduleSave(); if (back) boardView = { coll, mode: 'list' }; renderDashboard(); }
 function editBoardField(el, field) { const n = boardItems(el.dataset.coll).find((x) => x.id === el.dataset.id); if (n) { n[field] = el.value; scheduleSave(); } }
 
@@ -2298,7 +2309,7 @@ function meetingEditView(m) {
 function selectMeeting(id) { curMeeting = id; meetingEdit = false; renderMeetings(); }
 function deselectMeeting() { curMeeting = null; meetingEdit = false; renderMeetings(); }
 function toggleMeetingEdit() { meetingEdit = !meetingEdit; renderMeetings(); }
-function addMeeting() { const m = { id: uid('mt'), title: '', type: '일반 회의', date: todayStr(), time: '', attendees: [], authorId: '', authorName: getActor(), agenda: '', body: '', projectId: '' }; data.meetings.unshift(m); curMeeting = m.id; meetingEdit = true; scheduleSave(); renderMeetings(); }
+function addMeeting() { const m = { id: uid('mt'), title: '', type: '일반 회의', date: todayStr(), time: '', attendees: [], authorId: '', authorName: getActor(), agenda: '', body: '', projectId: '', createdAt: Date.now() }; data.meetings.unshift(m); curMeeting = m.id; meetingEdit = true; scheduleSave(); renderMeetings(); }
 function delMeeting(id) { if (!confirm('이 회의록을 삭제할까요? (휴지통에서 복원할 수 있습니다.)')) return; const removed = (data.meetings || []).find((m) => m.id === id); data.meetings = (data.meetings || []).filter((m) => m.id !== id); if (removed) trashAdd('meetings', removed.title, removed); if (curMeeting === id) curMeeting = null; if (pjOpenMeeting === id) { pjOpenMeeting = null; pjMeetingEdit = false; } meetingEdit = false; scheduleSave(); rerenderMeetingContext(); }
 function editMeetingField(el, f) { const m = (data.meetings || []).find((x) => x.id === el.dataset.id); if (!m) return; m[f] = el.value; scheduleSave(); if (f === 'type' || f === 'date' || f === 'time') rerenderMeetingContext(); }
 function toggleAttendee(mid, uid_, checked) { const m = (data.meetings || []).find((x) => x.id === mid); if (!m) return; m.attendees = m.attendees || []; if (checked) { if (!m.attendees.includes(uid_)) m.attendees.push(uid_); } else { m.attendees = m.attendees.filter((x) => x !== uid_); } scheduleSave(); rerenderMeetingContext(); }
@@ -2372,10 +2383,9 @@ function expCatColor(c) { const f = EXP_CATS.find((x) => x.name === c); return f
 function won(n) { return Math.round(n || 0).toLocaleString('ko-KR') + '원'; }
 function monthlyOf(e) { const a = parseFloat(e.amount) || 0; return e.cycle === '연' ? a / 12 : a; }
 function openExpenses() { view = 'brand'; curBrand = null; boardView = null; opsPage = null; expPage = true; render(); }
-function closeExpenses() { goDashboard(); }
 function renderExpensesPage() {
   const main = document.getElementById('main');
-  main.innerHTML = `<div class="b-head"><button class="back-btn" onclick="closeExpenses()">← 대시보드</button></div>` + renderExpenses();
+  main.innerHTML = renderExpenses();
 }
 function renderExpenses() {
   const items = data.expenses || [];
@@ -2663,10 +2673,16 @@ function renderThemeBand(theme, td) {
   const delBtn = count === 0 ? `<button class="grp-del" onclick="event.stopPropagation(); delGroup(${pushPair(theme, '', 'theme')})" title="빈 분류 삭제">×</button>` : '';
   let inner = '';
   if (!collapsed) {
+    // 이니셔티브(하위 분류)가 하나라도 있는지
+    const hasInits = td.initOrder.some((ini) => ini !== '');
     for (const ini of td.initOrder) {
       if (ini === '') {
         inner += td.inits[''].map((x) => renderTask(x.t, x.ti, ++cnt.n)).join('');
-        inner += `<button class="add-task-grp" onclick="addTaskToGroup(${pushPair(theme, '', 'theme')})">+ 업무 추가</button>`;
+        // 테마 직속 "+ 업무 추가"는: 직속 업무가 있거나(추가 편의) 또는 하위 분류가 전혀 없을 때만 표시
+        // → 하위 분류로만 정리된 테마에서 중복 버튼이 뜨던 문제 해결
+        if (td.inits[''].length > 0 || !hasInits) {
+          inner += `<button class="add-task-grp" onclick="addTaskToGroup(${pushPair(theme, '', 'theme')})">+ 업무 추가</button>`;
+        }
       } else {
         inner += renderInitSection(theme, ini, td.inits[ini]);
       }
