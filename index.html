@@ -885,13 +885,14 @@ async function load() {
 
 // 구버전 데이터를 현재 구조로 자동 변환 — 깨짐 방지
 function normalizeData(d) {
-  if (!d.brands) d.brands = [];
-  if (!d.members) d.members = [];
-  if (!d.logs) d.logs = [];
+  if (!d || typeof d !== 'object') d = {};
+  if (!Array.isArray(d.brands)) d.brands = [];
+  if (!Array.isArray(d.members)) d.members = [];
+  if (!Array.isArray(d.logs)) d.logs = [];
   if (typeof d.adminPin !== 'string') d.adminPin = '';
   if (!Array.isArray(d.auditLog)) d.auditLog = [];     // 삭제 기록 [{id,ts,actor,action,kind,label}]
-  if (!d.notices) d.notices = [];
-  if (!d.meetings) d.meetings = [];
+  if (!Array.isArray(d.notices)) d.notices = [];
+  if (!Array.isArray(d.meetings)) d.meetings = [];
   if (!Array.isArray(d.fixedTasks)) d.fixedTasks = [];        // 고정업무 정의 [{id, memberId, text}]
   if (!d.fixedChecks || typeof d.fixedChecks !== 'object') d.fixedChecks = {};  // 날짜별 체크 { "fixedId__YYYY-MM-DD": true }
   if (!Array.isArray(d.sites)) d.sites = [];                  // 자주가는 사이트 [{id, name, url}]
@@ -934,14 +935,19 @@ function normalizeData(d) {
           : { text: typeof v === 'string' ? v : '', images: [] });
         if (!Array.isArray(q.groups)) q.groups = [];                 // 선언된 분류(빈 그룹 포함)
         q.groups = q.groups.map((g) => ({ theme: ((g && g.theme) || '').trim(), initiative: ((g && g.initiative) || '').trim() })).filter((g) => g.theme);
-        for (const t of (q.tasks || [])) {
+        if (!Array.isArray(q.tasks)) q.tasks = [];                   // RTDB가 빈 배열을 누락시키는 것 방어
+        for (const t of q.tasks) {
           if (typeof t.theme !== 'string') t.theme = '';          // 대분류
           if (typeof t.initiative !== 'string') t.initiative = ''; // 이니셔티브
-          for (const ac of (t.activities || [])) {
+          if (!Array.isArray(t.activities)) t.activities = [];
+          if (t.metric != null && typeof t.metric !== 'object') t.metric = null;
+          for (const ac of t.activities) {
+          if (!Array.isArray(ac.actions) && !Array.isArray(ac.hypotheses)) { /* 둘 다 없을 수 있음 */ }
           if (Array.isArray(ac.actions)) ac.actions = ac.actions.map((x) =>
-            typeof x === 'string' ? { title: x, steps: [], metric: null } : { title: x.title || '', steps: x.steps || [], metric: x.metric || null, ord: x.ord });
+            typeof x === 'string' ? { title: x, steps: [], metric: null } : { title: x.title || '', steps: Array.isArray(x.steps) ? x.steps : [], metric: x.metric || null, ord: x.ord });
           if (Array.isArray(ac.hypotheses)) ac.hypotheses = ac.hypotheses.map((x) =>
-            typeof x === 'string' ? { text: x, steps: [], metric: null } : { text: x.text || '', steps: x.steps || [], metric: x.metric || null, ord: x.ord });
+            typeof x === 'string' ? { text: x, steps: [], metric: null } : { text: x.text || '', steps: Array.isArray(x.steps) ? x.steps : [], metric: x.metric || null, ord: x.ord });
+          if (!Array.isArray(ac.resultImages)) ac.resultImages = [];
           // 추가 순서(ord) 부여 — 없으면 가설 → 행동 순으로 부여(기존 표시 순서 유지)
           const allItems = [...(ac.hypotheses || []), ...(ac.actions || [])];
           if (allItems.some((x) => typeof x.ord !== 'number')) {
