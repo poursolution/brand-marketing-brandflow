@@ -3018,6 +3018,7 @@ const LS_KEY = 'brandflow_v1';
 let fbReady = false;       // Firebase 초기화 성공 여부
 let fbRef = null;          // workspace/main 참조
 let fbApplyingRemote = false; // 원격 수신 적용 중(저장 루프 방지)
+let selfWritePending = 0;     // 내가 방금 보낸 저장 횟수(메아리 무시용 카운터)
 
 function fbInit() {
   try {
@@ -3038,18 +3039,24 @@ load = async function () {
     return;
   }
   // 실시간 구독: 누군가 저장하면 모든 기기에 자동 반영
+  let firstLoad = true;
   fbRef.on('value', function (snap) {
     const val = snap.val();
     if (val == null) {
       // 최초 실행 — DB가 비어있으면 SEED로 초기화하여 1회 기록
       data = normalizeData(SEED);
+      selfWritePending++;
       fbRef.set(JSON.parse(JSON.stringify(data))).catch(function () {});
-    } else {
-      fbApplyingRemote = true;
-      data = normalizeData(val);
-      fbApplyingRemote = false;
+      curBrand = null; firstLoad = false; setSave('saved'); render();
+      return;
     }
-    curBrand = null; setSave('saved'); render();
+    // 내가 방금 보낸 저장이 메아리처럼 돌아온 것이면 → 무시(화면·커서 안 튐)
+    if (!firstLoad && selfWritePending > 0) { selfWritePending--; setSave('saved'); return; }
+    fbApplyingRemote = true;
+    data = normalizeData(val);
+    fbApplyingRemote = false;
+    if (firstLoad) { curBrand = null; firstLoad = false; }  // curBrand 초기화는 최초 1회만
+    setSave('saved'); render();
   }, function (err) {
     // 권한 거부 등 — 규칙이 잠겨있을 때
     data = normalizeData(SEED);
@@ -3063,9 +3070,10 @@ save = async function () {
   if (!fbReady || !fbRef) { setSave('error'); return; }
   try {
     // undefined 제거(JSON 직렬화)하여 통째로 저장
+    selfWritePending++;   // 이 저장의 메아리는 무시하도록 표시
     await fbRef.set(JSON.parse(JSON.stringify(data)));
     setSave('saved');
-  } catch (e) { setSave('error'); }
+  } catch (e) { selfWritePending = Math.max(0, selfWritePending - 1); setSave('error'); }
 };
 
 uploadImage = async function (blob) {
