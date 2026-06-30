@@ -683,6 +683,10 @@
              display:flex; align-items:center; justify-content:center; font-size: 11px; font-weight: 800; color:#fff; }
   .act-row { display:flex; align-items:center; gap: 8px; margin-bottom: 10px; }
   .round-label { font-weight: 800; font-size: 13px; }
+  .act-mode { display:inline-flex; gap: 3px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+  .mode-pill { border: none; background: none; font-size: 11px; font-weight: 700; color: var(--sub); padding: 3px 9px; border-radius: 6px; cursor: pointer; }
+  .mode-pill:hover { color: var(--ink); }
+  .mode-pill.on { background: var(--panel); color: var(--accent); box-shadow: var(--shadow-xs); }
   .fields { display: grid; gap: 8px; }
   .field { display:grid; grid-template-columns: 92px 1fr; gap: 10px; align-items:start; }
   .field label { font-size: 12px; font-weight: 700; color: var(--sub); padding-top: 8px; }
@@ -903,12 +907,12 @@ function normalizeData(d) {
   if (!Array.isArray(d.trash)) d.trash = [];                  // 휴지통 [{id, kind, label, ts, payload, ctx}]
   d.trash = d.trash.filter((t) => (Date.now() - (t && t.ts || 0)) < 30 * 24 * 60 * 60 * 1000);  // 30일 지난 항목 자동 삭제
   d.notices = d.notices.map((n) => (n.title === undefined && n.text !== undefined)
-    ? { id: n.id, title: n.text, body: '', date: n.date || '' }
-    : { id: n.id, title: n.title || '', body: n.body || '', date: n.date || '' });
+    ? { id: n.id, title: n.text, body: '', date: n.date || '', createdAt: n.createdAt }
+    : { id: n.id, title: n.title || '', body: n.body || '', date: n.date || '', createdAt: n.createdAt });
   d.meetings = d.meetings.map((n) => ({
     id: n.id, title: n.title || '', type: n.type || '일반 회의', date: n.date || '', time: n.time || '',
     attendees: Array.isArray(n.attendees) ? n.attendees : [], authorId: n.authorId || '', authorName: n.authorName || '',
-    agenda: n.agenda || '', body: n.body || '', projectId: n.projectId || '',
+    agenda: n.agenda || '', body: n.body || '', projectId: n.projectId || '', createdAt: n.createdAt,
   }));
   d.projects = d.projects.map((p) => ({
     id: p.id || uid('pj'), memberId: p.memberId || '', name: p.name || '', note: p.note || '',
@@ -942,6 +946,7 @@ function normalizeData(d) {
           if (!Array.isArray(t.activities)) t.activities = [];
           if (t.metric != null && typeof t.metric !== 'object') t.metric = null;
           for (const ac of t.activities) {
+          if (ac.mode !== 'goal' && ac.mode !== 'problem') ac.mode = (ac.round === 1 ? 'goal' : 'problem');
           if (!Array.isArray(ac.actions) && !Array.isArray(ac.hypotheses)) { /* 둘 다 없을 수 있음 */ }
           if (Array.isArray(ac.actions)) ac.actions = ac.actions.map((x) =>
             typeof x === 'string' ? { title: x, steps: [], metric: null } : { title: x.title || '', steps: Array.isArray(x.steps) ? x.steps : [], metric: x.metric || null, ord: x.ord });
@@ -1034,6 +1039,19 @@ function auditAdd(action, kind, label) {
 function auditSeenTs() { try { return parseInt(localStorage.getItem(LS_AUDIT_SEEN) || '0', 10) || 0; } catch (e) { return 0; } }
 function markAuditSeen() { try { localStorage.setItem(LS_AUDIT_SEEN, String(Date.now())); } catch (e) {} }
 function auditUnseen() { const s = auditSeenTs(); return (data.auditLog || []).filter((a) => (a.ts || 0) > s).length; }
+
+/* ---------- 공지·회의록 "안 읽음" 배지 (기기별, 카카오톡식) ---------- */
+function boardSeenKey(coll) { return 'brandflow_' + coll + '_seen'; }
+function boardSeenTs(coll) { try { return parseInt(localStorage.getItem(boardSeenKey(coll)) || '0', 10) || 0; } catch (e) { return 0; } }
+function markBoardSeen(coll) { try { localStorage.setItem(boardSeenKey(coll), String(Date.now())); } catch (e) {} }
+// 항목 추가시각(ms). createdAt 없으면 date(YYYY-MM-DD)를 그날 0시로 환산해 폴백
+function itemTs(it) {
+  if (it && typeof it.createdAt === 'number') return it.createdAt;
+  if (it && it.date) { const t = Date.parse(it.date + 'T00:00:00'); if (!isNaN(t)) return t; }
+  return 0;
+}
+function boardUnseen(coll) { const s = boardSeenTs(coll); return (data[coll] || []).filter((it) => itemTs(it) > s).length; }
+
 function openAudit() { if (!adminUnlocked) return; view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'audit'; logTrash = false; markAuditSeen(); render(); }
 function clearAudit() { if (!requireAdmin()) return; if (!confirm('활동 기록을 모두 비울까요? (되돌릴 수 없습니다)')) return; data.auditLog = []; scheduleSave(); renderAudit(); }
 function addBrand() {
@@ -1057,7 +1075,7 @@ function addYearGlobal() {
 }
 function addTask() {
   Q().tasks.push({ id: uid('t'), title: '새 업무', status: '진행중', theme: '', initiative: '', activities: [] });
-  scheduleSave(); render();
+  scheduleSave(); renderTasks(); renderSidebar();
 }
 function delTask(ti) {
   if (!confirm('이 업무와 모든 활동 기록을 삭제할까요? (휴지통에서 복원할 수 있습니다.)')) return;
@@ -1068,11 +1086,11 @@ function delTask(ti) {
 function addRound(ti) {
   const t = Q().tasks[ti];
   const round = t.activities.length + 1;
-  const base = { id: uid('a'), round, context: '', outcome: 'progress' };
+  const base = { id: uid('a'), round, context: '', outcome: 'progress', mode: round === 1 ? 'goal' : 'problem' };
   if (round === 1) { base.actions = [{ title: '', steps: [], metric: null, ord: 0 }]; base.result = ''; }
   else { base.hypotheses = [{ text: '', steps: [], metric: null, ord: 0 }]; base.result = ''; }
   t.activities.push(base);
-  scheduleSave(); render();
+  scheduleSave(); renderTasks();
 }
 /* 1차 행동 (제목 + 세부단계 + 하위지표) */
 /* 가설·행동 추가 순서 카운터 */
@@ -1205,7 +1223,7 @@ function delRound(ti, ai) {
   const t = Q().tasks[ti];
   t.activities.splice(ai, 1);
   t.activities.forEach((a, i) => a.round = i + 1);
-  scheduleSave(); render();
+  scheduleSave(); renderTasks();
 }
 
 /* 텍스트 편집: 재렌더 없이 상태만 갱신 (현재 브랜드·연도 기준) */
@@ -1271,8 +1289,8 @@ function marketingNav() {
       </div>`).join('') +
     (adminUnlocked ? `<button class="add-sub-nav" onclick="addBrand()">+ 브랜드 추가하기</button>` : '') +
     `<div class="side-cap">운영</div>` +
-    navItem(boardView && boardView.coll === 'notices', 'navNotices()', '📢 공지사항') +
-    navItem(boardView && boardView.coll === 'meetings', 'navMeetings()', '📝 회의록') +
+    navItem(boardView && boardView.coll === 'notices', 'navNotices()', `📢 공지사항${boardUnseen('notices') ? ` <span class="ah-badge">${boardUnseen('notices') > 99 ? '99+' : boardUnseen('notices')}</span>` : ''}`) +
+    navItem(boardView && boardView.coll === 'meetings', 'navMeetings()', `📝 회의록${boardUnseen('meetings') ? ` <span class="ah-badge">${boardUnseen('meetings') > 99 ? '99+' : boardUnseen('meetings')}</span>` : ''}`) +
     navItem(opsPage === 'sites', 'openSites()', '🔗 사이트모음') +
     navItem(opsPage === 'ai', 'openAi()', '🤖 마케팅팀 AI 모음') +
     navItem(expPage, 'openExpenses()', '💳 고정지출관리') +
@@ -1298,8 +1316,8 @@ function goLogDash() { view = 'log'; curMember = null; curProject = null; pjOpen
 function selectMember(id) { view = 'log'; curMember = id; curProject = null; pjOpenMeeting = null; pjMeetingEdit = false; pjSearch = ''; pjTab = 'active'; logTrash = false; render(); }
 function openLogTrash() { view = 'log'; curMember = null; curProject = null; pjOpenMeeting = null; pjMeetingEdit = false; logTrash = true; render(); }
 function goDashboard() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = null; render(); }
-function navNotices() { view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'notices', mode: 'list' }; render(); }
-function navMeetings() { view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'meetings', mode: 'list' }; render(); }
+function navNotices() { markBoardSeen('notices'); view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'notices', mode: 'list' }; render(); }
+function navMeetings() { markBoardSeen('meetings'); view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'meetings', mode: 'list' }; render(); }
 function openSites() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'sites'; render(); }
 function openAi() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'ai'; render(); }
 function selectBrand(i) { view = 'brand'; curBrand = i; curQuarter = 0; curCat = 'growth'; boardView = null; expPage = false; opsPage = null; render(); }
@@ -2157,7 +2175,7 @@ function renderBoardDetail(coll, id) {
 }
 function openBoard(coll) { boardView = { coll, mode: 'list' }; renderDashboard(); }
 function openBoardItem(coll, id) { boardView = { coll, mode: id }; renderDashboard(); }
-function addBoard(coll) { const n = { id: uid('x'), title: '', body: '', date: todayStr() }; boardItems(coll).unshift(n); scheduleSave(); boardView = { coll, mode: n.id }; renderDashboard(); }
+function addBoard(coll) { const n = { id: uid('x'), title: '', body: '', date: todayStr(), createdAt: Date.now() }; boardItems(coll).unshift(n); scheduleSave(); boardView = { coll, mode: n.id }; renderDashboard(); }
 function delBoardItem(coll, id, back) { if (!confirm('삭제할까요? (휴지통에서 복원할 수 있습니다.)')) return; const removed = boardItems(coll).find((n) => n.id === id); data[coll] = boardItems(coll).filter((n) => n.id !== id); if (removed) trashAdd(coll, removed.title, removed); scheduleSave(); if (back) boardView = { coll, mode: 'list' }; renderDashboard(); }
 function editBoardField(el, field) { const n = boardItems(el.dataset.coll).find((x) => x.id === el.dataset.id); if (n) { n[field] = el.value; scheduleSave(); } }
 
@@ -2296,7 +2314,7 @@ function meetingEditView(m) {
 function selectMeeting(id) { curMeeting = id; meetingEdit = false; renderMeetings(); }
 function deselectMeeting() { curMeeting = null; meetingEdit = false; renderMeetings(); }
 function toggleMeetingEdit() { meetingEdit = !meetingEdit; renderMeetings(); }
-function addMeeting() { const m = { id: uid('mt'), title: '', type: '일반 회의', date: todayStr(), time: '', attendees: [], authorId: '', authorName: getActor(), agenda: '', body: '', projectId: '' }; data.meetings.unshift(m); curMeeting = m.id; meetingEdit = true; scheduleSave(); renderMeetings(); }
+function addMeeting() { const m = { id: uid('mt'), title: '', type: '일반 회의', date: todayStr(), time: '', attendees: [], authorId: '', authorName: getActor(), agenda: '', body: '', projectId: '', createdAt: Date.now() }; data.meetings.unshift(m); curMeeting = m.id; meetingEdit = true; scheduleSave(); renderMeetings(); }
 function delMeeting(id) { if (!confirm('이 회의록을 삭제할까요? (휴지통에서 복원할 수 있습니다.)')) return; const removed = (data.meetings || []).find((m) => m.id === id); data.meetings = (data.meetings || []).filter((m) => m.id !== id); if (removed) trashAdd('meetings', removed.title, removed); if (curMeeting === id) curMeeting = null; if (pjOpenMeeting === id) { pjOpenMeeting = null; pjMeetingEdit = false; } meetingEdit = false; scheduleSave(); rerenderMeetingContext(); }
 function editMeetingField(el, f) { const m = (data.meetings || []).find((x) => x.id === el.dataset.id); if (!m) return; m[f] = el.value; scheduleSave(); if (f === 'type' || f === 'date' || f === 'time') rerenderMeetingContext(); }
 function toggleAttendee(mid, uid_, checked) { const m = (data.meetings || []).find((x) => x.id === mid); if (!m) return; m.attendees = m.attendees || []; if (checked) { if (!m.attendees.includes(uid_)) m.attendees.push(uid_); } else { m.attendees = m.attendees.filter((x) => x !== uid_); } scheduleSave(); rerenderMeetingContext(); }
@@ -2660,10 +2678,16 @@ function renderThemeBand(theme, td) {
   const delBtn = count === 0 ? `<button class="grp-del" onclick="event.stopPropagation(); delGroup(${pushPair(theme, '', 'theme')})" title="빈 분류 삭제">×</button>` : '';
   let inner = '';
   if (!collapsed) {
+    // 이니셔티브(하위 분류)가 하나라도 있는지
+    const hasInits = td.initOrder.some((ini) => ini !== '');
     for (const ini of td.initOrder) {
       if (ini === '') {
         inner += td.inits[''].map((x) => renderTask(x.t, x.ti, ++cnt.n)).join('');
-        inner += `<button class="add-task-grp" onclick="addTaskToGroup(${pushPair(theme, '', 'theme')})">+ 업무 추가</button>`;
+        // 테마 직속 "+ 업무 추가"는: 직속 업무가 있거나(추가 편의) 또는 하위 분류가 전혀 없을 때만 표시
+        // → 하위 분류로만 정리된 테마에서 중복 버튼이 뜨던 문제 해결
+        if (td.inits[''].length > 0 || !hasInits) {
+          inner += `<button class="add-task-grp" onclick="addTaskToGroup(${pushPair(theme, '', 'theme')})">+ 업무 추가</button>`;
+        }
       } else {
         inner += renderInitSection(theme, ini, td.inits[ini]);
       }
@@ -2715,6 +2739,8 @@ function renderUnclassified(items) {
 }
 function renderTasks() {
   const wrap = document.getElementById('tasks');
+  const scroller = document.getElementById('main');           // 스크롤 컨테이너
+  const savedScroll = scroller ? scroller.scrollTop : 0;       // 현재 스크롤 위치 기억
   const q = Q();
   _groupKeys = []; _groupPairs = [];
   const tasks = q.tasks.map((t, ti) => ({ t, ti }));
@@ -2746,6 +2772,7 @@ function renderTasks() {
     `<button class="add-task" onclick="addTask()">+ 업무 추가${grouped ? ' (미분류)' : ''}</button>` +
     extraSection();
   sizeTextareas();
+  if (scroller) scroller.scrollTop = savedScroll;              // 스크롤 위치 복원 → 화면 안 튐
 }
 function renderGrouped(tasks, groups) {
   // 같은 대분류는 한 밴드로 묶고, 이니셔티브는 그 안의 소제목
@@ -2886,18 +2913,6 @@ function flowItem(item, ti, ai, target, idx, dispNum) {
       ${itemImageStrip(item, target, ti, ai, idx)}
     </div>`;
 }
-// 1차: 행동 리스트
-function actionsBlock(a, ti, ai) {
-  const items = a.actions && a.actions.length ? a.actions : [{ title: '', steps: [], metric: null }];
-  return `
-    <div class="field">
-      <label>행동</label>
-      <div class="list">
-        ${items.map((act, idx) => flowItem(act, ti, ai, 'action', idx)).join('')}
-        <button class="add-sub" onclick="addAction(${ti},${ai})">+ 행동 추가</button>
-      </div>
-    </div>`;
-}
 // 2차+: 가설/행동 리스트 (추가한 순서대로 나열, 결과는 별도 통합 칸)
 function hypBlock(a, ti, ai) {
   const hyps = a.hypotheses || [];
@@ -2925,21 +2940,34 @@ function hypBlock(a, ti, ai) {
       </div>
     </div>`;
 }
+function actMode(a) {
+  // 'goal' = 목표형, 'problem' = 문제형. 없으면 1차는 목표형, 그 외는 문제형(기존 데이터 호환)
+  if (a.mode === 'goal' || a.mode === 'problem') return a.mode;
+  return a.round === 1 ? 'goal' : 'problem';
+}
+function setActMode(ti, ai, mode) {
+  const a = Q().tasks[ti].activities[ai];
+  a.mode = mode;
+  scheduleSave(); renderTasks();
+}
 function renderAct(a, ti, ai) {
-  const isFirst = a.round === 1;
+  const mode = actMode(a);
+  const ctxLabel = mode === 'goal' ? '목표 / 실행 이유' : '문제/이슈';
+  const ctxPlaceholder = mode === 'goal' ? '이 업무의 목표 또는 실행 이유' : '직전 차수에서 무슨 문제가 있었나';
   const resultBlock = single('result', '결과', '결과가 어땠나 (이미지는 Ctrl+V로 붙여넣기)', a, ti, ai) + resultImageStrip(a, ti, ai);
-  const body = isFirst
-    ? single('context', '목표 / 실행 이유', '이 업무의 목표 또는 실행 이유', a, ti, ai)
-      + actionsBlock(a, ti, ai)
-      + resultBlock
-    : single('context', '문제/이슈', '직전 차수에서 무슨 문제가 있었나', a, ti, ai)
-      + hypBlock(a, ti, ai)
-      + resultBlock;
+  // 차수와 무관하게: 목표형/문제형 선택 + 가설·행동 둘 다(hypBlock)
+  const body = single('context', ctxLabel, ctxPlaceholder, a, ti, ai)
+    + hypBlock(a, ti, ai)
+    + resultBlock;
   return `
   <div class="act">
     <div class="act-dot" style="background:var(--accent)">${a.round}</div>
     <div class="act-row">
       <span class="round-label">${a.round}차 활동</span>
+      <div class="act-mode">
+        <button class="mode-pill ${mode === 'goal' ? 'on' : ''}" onclick="setActMode(${ti},${ai},'goal')">목표형</button>
+        <button class="mode-pill ${mode === 'problem' ? 'on' : ''}" onclick="setActMode(${ti},${ai},'problem')">문제형</button>
+      </div>
       <button class="act-del" onclick="delRound(${ti},${ai})">삭제</button>
     </div>
     <div class="fields">${body}</div>
