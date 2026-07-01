@@ -846,6 +846,8 @@ const STATUSES = ['예정', '진행중', '완료', '보류'];
 let data = { brands: [], members: [], logs: [] };
 let curBrand = null;   // index
 let curQuarter = 0;    // index
+let quarterByBrand = {}; // 브랜드별 마지막 본 분기 기억 (brandId -> index)
+function defaultQuarter() { return Math.floor(new Date().getMonth() / 3); } // 오늘 기준 현재 분기(0~3)
 let view = 'brand';    // 'brand' | 'log'
 let adminUnlocked = false;  // 관리자 잠금 해제 여부(세션 한정)
 let adminHelpOpen = false;  // 관리자 전용 작업 안내 패널 펼침 여부(기본 접힘)
@@ -1332,7 +1334,7 @@ function navNotices() { markBoardSeen('notices'); view = 'brand'; curBrand = nul
 function navMeetings() { markBoardSeen('meetings'); view = 'brand'; curBrand = null; expPage = false; opsPage = null; boardView = { coll: 'meetings', mode: 'list' }; render(); }
 function openSites() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'sites'; render(); }
 function openAi() { view = 'brand'; curBrand = null; boardView = null; expPage = false; opsPage = 'ai'; render(); }
-function selectBrand(i) { view = 'brand'; curBrand = i; curQuarter = 0; curCat = 'growth'; boardView = null; expPage = false; opsPage = null; render(); }
+function selectBrand(i) { view = 'brand'; curBrand = i; const b = data.brands[i]; curQuarter = (b && quarterByBrand[b.id] != null) ? quarterByBrand[b.id] : defaultQuarter(); curCat = 'growth'; boardView = null; expPage = false; opsPage = null; render(); }
 function delBrand(i) {
   if (!requireAdmin()) return;
   if (!confirm(`'${data.brands[i].name}' 브랜드를 삭제할까요? (안의 모든 업무·활동이 함께 삭제됩니다. 휴지통에서 복원할 수 있습니다.)`)) return;
@@ -1425,7 +1427,7 @@ function restoreData(input) {
   };
   reader.readAsText(f);
 }
-function selectQuarter(i) { curQuarter = i; renderMain(); }
+function selectQuarter(i) { curQuarter = i; const b = B(); if (b) quarterByBrand[b.id] = i; renderMain(); }
 
 /* 당일 체크(완료) 못 한 업무는 자동으로 다음 날(=오늘)로 이월. 완료된 기록은 그날 그대로 보존, 미래 예정은 건드리지 않음 */
 function carryOverIncomplete() {
