@@ -2678,7 +2678,7 @@ function addGroup() {
 function addTaskToGroup(i) { // 해당 분류로 새 업무 생성
   const p = _groupPairs[i]; if (!p) return;
   Q().tasks.push({ id: uid('t'), title: '새 업무', status: '진행중', theme: p.theme || '', initiative: p.initiative || '', activities: [] });
-  scheduleSave(); render();
+  scheduleSave(); renderTasks(); renderSidebar();
 }
 function delGroup(i) { // 빈 선언 그룹 제거(업무는 영향 없음)
   const p = _groupPairs[i]; if (!p) return;
