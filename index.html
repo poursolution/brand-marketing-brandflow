@@ -401,6 +401,9 @@
   .lw-mk.p { color: var(--neutral); }
   .lw-tx { min-width: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
   .lw-tx.done { color: var(--neutral); text-decoration: line-through; }
+  .lw-pin { font-size: 11px; margin-right: 2px; opacity: .75; }
+  .lw-row.fx .lw-tx { color: var(--sub); }
+  .lw-row.fx .lw-tx.done { color: var(--neutral); }
   .lw-none { color: var(--neutral); font-size: 14px; }
   @media (max-width: 1180px) { .log-grid { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 680px) { .log-grid { grid-template-columns: 1fr; } }
@@ -1023,8 +1026,17 @@ function adminToggle() {
 /* 삭제 기록(감사 로그) — 로그인이 없으므로 '누가'는 기기별 기록 이름으로 표시 */
 const LS_ACTOR = 'brandflow_actor';
 const LS_AUDIT_SEEN = 'brandflow_audit_seen';
-function getActor() { try { return (localStorage.getItem(LS_ACTOR) || '').trim(); } catch (e) { return ''; } }
-function setActorName(v) { try { localStorage.setItem(LS_ACTOR, (v || '').trim()); } catch (e) {} }
+/* ---------- 영속 저장: localStorage + 쿠키 이중화 (localStorage가 날아가도 복원) ---------- */
+function cookieSet(k, v) { try { document.cookie = k + '=' + encodeURIComponent(v) + ';path=/;max-age=' + (60 * 60 * 24 * 365 * 2) + ';SameSite=Lax'; } catch (e) {} }
+function cookieGet(k) { try { const m = document.cookie.match('(?:^|; )' + k.replace(/[.$?*|{}()[\]\\/+^]/g, '\\$&') + '=([^;]*)'); return m ? decodeURIComponent(m[1]) : null; } catch (e) { return null; } }
+function persistGet(k) {
+  let v = null; try { v = localStorage.getItem(k); } catch (e) {}
+  if (v === null || v === undefined) { const c = cookieGet(k); if (c !== null) { v = c; try { localStorage.setItem(k, c); } catch (e) {} } } // 쿠키 → localStorage 재수화
+  return v;
+}
+function persistSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} cookieSet(k, v); }
+function getActor() { const v = persistGet(LS_ACTOR); return (v || '').trim(); }
+function setActorName(v) { persistSet(LS_ACTOR, (v || '').trim()); }
 function onActorInput(el) { setActorName(el.value); }
 function avatarChar(name) { const n = (name || '?').trim(); if (!n) return '?'; return n.charAt(Math.floor(n.length / 2)); }
 function userAvatar(name) { const n = (name || '?').trim(); const c = avatarColor(n); return `<span class="user-av" style="background:${c}">${esc(avatarChar(n))}</span>`; }
@@ -1036,14 +1048,14 @@ function auditAdd(action, kind, label) {
   if (data.auditLog.length > 300) data.auditLog.length = 300;
   scheduleSave();
 }
-function auditSeenTs() { try { return parseInt(localStorage.getItem(LS_AUDIT_SEEN) || '0', 10) || 0; } catch (e) { return 0; } }
-function markAuditSeen() { try { localStorage.setItem(LS_AUDIT_SEEN, String(Date.now())); } catch (e) {} }
+function auditSeenTs() { const v = persistGet(LS_AUDIT_SEEN); return parseInt(v || '0', 10) || 0; }
+function markAuditSeen() { persistSet(LS_AUDIT_SEEN, String(Date.now())); }
 function auditUnseen() { const s = auditSeenTs(); return (data.auditLog || []).filter((a) => (a.ts || 0) > s).length; }
 
 /* ---------- 공지·회의록 "안 읽음" 배지 (기기별, 카카오톡식) ---------- */
 function boardSeenKey(coll) { return 'brandflow_' + coll + '_seen'; }
-function boardSeenTs(coll) { try { return parseInt(localStorage.getItem(boardSeenKey(coll)) || '0', 10) || 0; } catch (e) { return 0; } }
-function markBoardSeen(coll) { try { localStorage.setItem(boardSeenKey(coll), String(Date.now())); } catch (e) {} }
+function boardSeenTs(coll) { const v = persistGet(boardSeenKey(coll)); return parseInt(v || '0', 10) || 0; }
+function markBoardSeen(coll) { persistSet(boardSeenKey(coll), String(Date.now())); }
 // 항목 추가시각(ms). createdAt 없으면 date(YYYY-MM-DD)를 그날 0시로 환산해 폴백
 function itemTs(it) {
   if (it && typeof it.createdAt === 'number') return it.createdAt;
@@ -1575,19 +1587,26 @@ function renderLogBody() {
     const mine = weekLogs.filter((e) => e.memberId === m.id);
     const done = mine.filter((e) => e.status === '완료').length;
     const prog = mine.length - done;
+    const fx = fixedOfMember(m.id);
     const cells = days.map((ds) => {
       const [yy, mm, dd] = ds.split('-').map(Number);
       const dow = DOW[new Date(yy, mm - 1, dd).getDay()];
       const dl = mine.filter((e) => e.date === ds);
       const isToday = ds === today;
+      const fixedRows = fx.map((f) => {
+        const fdone = isFixedDone(f.id, ds);
+        return `<div class="lw-row fx"><span class="lw-mk ${fdone ? 'd' : 'p'}">${fdone ? '✓' : '·'}</span><span class="lw-tx ${fdone ? 'done' : ''}"><span class="lw-pin" title="고정업무">📌</span>${f.text ? esc(f.text) : '<span class="muted">(제목 없음)</span>'}</span></div>`;
+      }).join('');
+      const logRows = dl.map((e) => {
+        const dn = e.status === '완료';
+        return `<div class="lw-row"><span class="lw-mk ${dn ? 'd' : 'p'}">${dn ? '✓' : '·'}</span><span class="lw-tx ${dn ? 'done' : ''}">${e.text ? esc(e.text) : '<span class="muted">내용 없음</span>'}</span></div>`;
+      }).join('');
+      const hasAny = fx.length || dl.length;
       return `
         <div class="lw-day${isToday ? ' today' : ''}">
           <span class="lw-dow">${dow} ${dd}</span>
           <div class="lw-tasks">
-            ${dl.length ? dl.map((e) => {
-              const dn = e.status === '완료';
-              return `<div class="lw-row"><span class="lw-mk ${dn ? 'd' : 'p'}">${dn ? '✓' : '·'}</span><span class="lw-tx ${dn ? 'done' : ''}">${e.text ? esc(e.text) : '<span class="muted">내용 없음</span>'}</span></div>`;
-            }).join('') : '<span class="lw-none">·</span>'}
+            ${fixedRows}${logRows}${hasAny ? '' : '<span class="lw-none">·</span>'}
           </div>
         </div>`;
     }).join('');
