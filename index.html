@@ -881,6 +881,8 @@ let logDate = todayStr();
 let calMonth = todayStr().slice(0, 7);  // 달력에 표시 중인 월 (YYYY-MM)
 let fxManage = false;  // 멤버 페이지 고정업무 관리 모드
 let saveTimer = null;
+let pendingRemote = null; // 입력 중 들어온 최신 원격 스냅샷(미뤄뒀다 반영)
+let lastSynced = null;    // 마지막으로 서버와 맞춰진 스냅샷(변경분 계산 기준)
 
 const uid = (p) => p + '-' + Math.random().toString(36).slice(2, 8);
 
@@ -975,6 +977,7 @@ function normalizeData(d) {
 
 function scheduleSave() {
   setSave('saving');
+  pendingRemote = null;   // 내가 방금 수정했으면 미뤄둔 원격 스냅샷은 버림(내 편집 우선)
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, 500);
 }
@@ -3076,11 +3079,52 @@ function fbInit() {
   } catch (e) { fbReady = false; return false; }
 }
 
+/* 변경분(leaf 경로)만 뽑아 Firebase update()로 부분 저장 → 동시 편집 병합(유실 방지) */
+function deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+function buildUpdates(base, cur, prefix, out) {
+  const bIsObj = base && typeof base === 'object';
+  const cIsObj = cur && typeof cur === 'object';
+  if (cIsObj && bIsObj) {
+    for (const k in cur) { if (Object.prototype.hasOwnProperty.call(cur, k)) buildUpdates(base[k], cur[k], prefix ? prefix + '/' + k : k, out); }
+    for (const k in base) { if (Object.prototype.hasOwnProperty.call(base, k) && !(k in cur)) out[prefix ? prefix + '/' + k : k] = null; }
+    return;
+  }
+  if (JSON.stringify(base) !== JSON.stringify(cur)) out[prefix] = (cur === undefined ? null : cur);
+}
+function diffUpdates(base, cur) { const out = {}; buildUpdates(deepCopy(base), deepCopy(cur), '', out); return out; }
+
+/* 원격(다른 사람 저장) 반영 시: 내가 입력 중인지 판단 + 스크롤 유지 */
+function isEditingField() {
+  const el = document.activeElement;
+  if (!el) return false;
+  const editable = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+  const main = document.getElementById('main');
+  return editable && main && main.contains(el);
+}
+function applyRemoteData(val) {
+  const scroller = document.getElementById('main');
+  const savedScroll = scroller ? scroller.scrollTop : 0;   // 현재 스크롤 기억
+  fbApplyingRemote = true;
+  data = normalizeData(val);
+  lastSynced = deepCopy(data);                             // 변경분 계산 기준 갱신
+  fbApplyingRemote = false;
+  setSave('saved');
+  render();
+  if (scroller) scroller.scrollTop = savedScroll;          // 원격 반영해도 화면 안 튐
+}
+// 입력을 마치면(포커스 이동) 미뤄둔 원격 변경을 반영
+document.addEventListener('focusout', function () {
+  setTimeout(function () {
+    if (pendingRemote != null && !isEditingField()) { const v = pendingRemote; pendingRemote = null; applyRemoteData(v); }
+  }, 0);
+});
+
 load = async function () {
   setSave('loading');
   if (!fbInit()) {
     // Firebase 미연결(오프라인·SDK 차단 등) — SEED로 화면만 띄움
     data = normalizeData(SEED);
+    lastSynced = deepCopy(data);
     curBrand = null; setSave('error'); render();
     return;
   }
@@ -3091,6 +3135,7 @@ load = async function () {
     if (val == null) {
       // 최초 실행 — DB가 비어있으면 SEED로 초기화하여 1회 기록
       data = normalizeData(SEED);
+      lastSynced = deepCopy(data);
       selfWritePending++;
       fbRef.set(JSON.parse(JSON.stringify(data))).catch(function () {});
       curBrand = null; firstLoad = false; setSave('saved'); render();
@@ -3098,11 +3143,10 @@ load = async function () {
     }
     // 내가 방금 보낸 저장이 메아리처럼 돌아온 것이면 → 무시(화면·커서 안 튐)
     if (!firstLoad && selfWritePending > 0) { selfWritePending--; setSave('saved'); return; }
-    fbApplyingRemote = true;
-    data = normalizeData(val);
-    fbApplyingRemote = false;
-    if (firstLoad) { curBrand = null; firstLoad = false; }  // curBrand 초기화는 최초 1회만
-    setSave('saved'); render();
+    if (firstLoad) { applyRemoteData(val); curBrand = null; firstLoad = false; return; }  // curBrand 초기화는 최초 1회만
+    // 다른 사람의 원격 변경: 내가 입력 중이면 커서·타이핑 방해하지 않도록 잠깐 미룸
+    if (isEditingField()) { pendingRemote = val; setSave('saved'); return; }
+    applyRemoteData(val);
   }, function (err) {
     // 권한 거부 등 — 규칙이 잠겨있을 때
     data = normalizeData(SEED);
@@ -3115,9 +3159,20 @@ save = async function () {
   if (fbApplyingRemote) { setSave('saved'); return; } // 원격 적용 중엔 되쓰지 않음
   if (!fbReady || !fbRef) { setSave('error'); return; }
   try {
-    // undefined 제거(JSON 직렬화)하여 통째로 저장
-    selfWritePending++;   // 이 저장의 메아리는 무시하도록 표시
-    await fbRef.set(JSON.parse(JSON.stringify(data)));
+    const snapshot = JSON.parse(JSON.stringify(data)); // undefined 제거 + 이번에 저장하는 상태 고정
+    if (lastSynced == null) {
+      // 기준 스냅샷이 없으면(예외) 통째로 저장
+      selfWritePending++;
+      await fbRef.set(snapshot);
+    } else {
+      // 바뀐 항목만 부분 저장 → 다른 사람이 동시에 고친 다른 항목을 덮어쓰지 않음
+      const updates = diffUpdates(lastSynced, snapshot);
+      const changed = Object.keys(updates).length;
+      if (changed === 0) { setSave('saved'); return; } // 바뀐 게 없으면 저장 안 함
+      selfWritePending++;   // 이 저장의 메아리는 무시하도록 표시
+      await fbRef.update(updates);
+    }
+    lastSynced = snapshot; // 방금 저장한 상태를 새 기준으로
     setSave('saved');
   } catch (e) { selfWritePending = Math.max(0, selfWritePending - 1); setSave('error'); }
 };
